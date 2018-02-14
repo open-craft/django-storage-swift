@@ -136,6 +136,19 @@ class ConfigTest(SwiftStorageTestCase):
         storage_url = '{}/v1/AUTH_{}/{}/'.format(url, TENANT_ID, "container")
         self.assertEqual(backend.base_url, storage_url)
 
+    def test_override_lazy_connect(self):
+        """Test setting lazy_connect"""
+        backend = self.default_storage('v3',
+                                       lazy_connect=True)
+        self.assertIsNone(backend.base_url)
+
+        # Run existence check to trigger connection
+        exists = backend.exists('warez/some_random_movie.mp4')
+        self.assertFalse(exists)
+
+        # Ensure that base_url is now set
+        self.assertEqual(backend.base_url, base_url(container="container"))
+
 
 @patch('swift.storage.swiftclient', new=FakeSwift)
 class TokenTest(SwiftStorageTestCase):

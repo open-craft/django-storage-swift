@@ -14,6 +14,7 @@ from django.core.files import File
 from django.core.files.storage import Storage
 from six.moves.urllib import parse as urlparse
 
+
 try:
     from django.utils.deconstruct import deconstructible
 except ImportError:
@@ -140,9 +141,12 @@ class SwiftStorage(Storage):
     auth_token_duration = setting('SWIFT_AUTH_TOKEN_DURATION', 60 * 60 * 23)
     os_extra_options = setting('SWIFT_EXTRA_OPTIONS', {})
     auto_overwrite = setting('SWIFT_AUTO_OVERWRITE', False)
+    lazy_connect = setting('SWIFT_LAZY_CONNECT', False)
     content_type_from_fd = setting('SWIFT_CONTENT_TYPE_FROM_FD', False)
     _token_creation_time = 0
     _token = ''
+    _storage_url = ''
+    _container_exists = None
     name_prefix = setting('SWIFT_NAME_PREFIX', '')
     full_listing = setting('SWIFT_FULL_LISTING', True)
 
@@ -168,37 +172,45 @@ class SwiftStorage(Storage):
         }
         self.os_options.update(self.os_extra_options)
 
-        # Get authentication token
-        self.storage_url, self.token = swiftclient.get_auth(
-            self.api_auth_url,
-            self.api_username,
-            self.api_key,
-            auth_version=self.auth_version,
-            os_options=self.os_options)
-        self.http_conn = swiftclient.http_connection(self.storage_url)
+        if self.auto_base_url:
+            # Will be set when storage_url is set
+            self.base_url = None
+        else:
+            self.base_url = self.override_base_url
 
-        # Check container
-        try:
-            swiftclient.head_container(self.storage_url,
-                                       self.token,
-                                       self.container_name,
-                                       http_conn=self.http_conn)
-        except swiftclient.ClientException:
-            headers = {}
-            if self.auto_create_container:
-                if self.auto_create_container_public:
-                    headers['X-Container-Read'] = '.r:*'
-                if self.auto_create_container_allow_orgin:
-                    headers['X-Container-Meta-Access-Control-Allow-Origin'] = \
-                        self.auto_create_container_allow_orgin
-                swiftclient.put_container(self.storage_url,
-                                          self.token,
-                                          self.container_name,
-                                          http_conn=self.http_conn,
-                                          headers=headers)
-            else:
-                raise ImproperlyConfigured(
-                    "Container %s does not exist." % self.container_name)
+        self.http_conn = None
+        if not self.lazy_connect:
+            self.get_token()
+
+    def get_token(self):
+        if time() - self._token_creation_time >= self.auth_token_duration:
+            self.storage_url, self.token = swiftclient.get_auth(
+                self.api_auth_url,
+                self.api_username,
+                self.api_key,
+                auth_version=self.auth_version,
+                os_options=self.os_options)
+
+        return self._token
+
+    def set_token(self, new_token):
+        self._token_creation_time = time()
+        self._token = new_token
+        self._check_container()
+
+    token = property(get_token, set_token)
+
+    def get_storage_url(self):
+        """
+        Since the token and storage url are fetched together,
+        let that method set the storage url.
+        """
+        if not self._storage_url:
+            self.get_token()
+        return self._storage_url
+
+    def set_storage_url(self, storage_url):
+        self._storage_url = storage_url
 
         if self.auto_base_url:
             # Derive a base URL based on the authentication information from
@@ -218,25 +230,42 @@ class SwiftStorage(Storage):
             self.base_url = urlparse.urljoin(self.base_url,
                                              self.container_name)
             self.base_url += '/'
-        else:
-            self.base_url = self.override_base_url
 
-    def get_token(self):
-        if time() - self._token_creation_time >= self.auth_token_duration:
-            new_token = swiftclient.get_auth(
-                self.api_auth_url,
-                self.api_username,
-                self.api_key,
-                auth_version=self.auth_version,
-                os_options=self.os_options)[1]
-            self.token = new_token
-        return self._token
+    storage_url = property(get_storage_url, set_storage_url)
 
-    def set_token(self, new_token):
-        self._token_creation_time = time()
-        self._token = new_token
+    def _check_container(self, force=False):
+        """
+        Check that container exists.
+        """
+        if not (force or self._container_exists is None):
+            return
 
-    token = property(get_token, set_token)
+        # Check container
+        try:
+            self.http_conn = swiftclient.http_connection(self.storage_url)
+            swiftclient.head_container(self.storage_url,
+                                       self._token,
+                                       self.container_name,
+                                       http_conn=self.http_conn)
+            self._container_exists = True
+        except swiftclient.ClientException:
+            headers = {}
+            if self.auto_create_container:
+                if self.auto_create_container_public:
+                    headers['X-Container-Read'] = '.r:*'
+                if self.auto_create_container_allow_orgin:
+                    headers['X-Container-Meta-Access-Control-Allow-Origin'] = \
+                        self.auto_create_container_allow_orgin
+                swiftclient.put_container(self.storage_url,
+                                          self._token,
+                                          self.container_name,
+                                          http_conn=self.http_conn,
+                                          headers=headers)
+                self._container_exists = True
+            else:
+                raise ImproperlyConfigured(
+                    "Container %s does not exist." % self.container_name)
+                self._container_exists = False
 
     def _open(self, name, mode='rb'):
         original_name = name
