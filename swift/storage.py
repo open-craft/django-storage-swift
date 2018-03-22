@@ -265,7 +265,7 @@ class SwiftStorage(Storage):
             content.seek(0)
         else:
             content_type = mimetypes.guess_type(name)[0]
-        content_length = content.size
+        content_length = content.size or None
         self.swift_conn.put_object(self.container_name,
                                    name,
                                    content,

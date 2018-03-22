@@ -288,12 +288,31 @@ class BackendTest(SwiftStorageTestCase):
         content_file.seek(5)
 
         def mocked_put_object(cls, url, token, container, name=None,
-                              contents=None, *args, **kwargs):
+                              contents=None, content_length=None, *args, **kwargs):
             content['saved'] = contents.read()
+            content['size'] = content_length
 
         with patch('tests.utils.FakeSwift.put_object', new=classmethod(mocked_put_object)):
             self.backend.save('test.txt', content_file)
         self.assertEqual(content['saved'], content['orig'])
+        self.assertEqual(content['size'], len(content['orig']))
+
+    def test_save_zero_length(self):
+        """Save file whose size appears to be zero"""
+        content = dict(orig="Hello world!")
+        content_file = ContentFile("")
+        content_file.write(content['orig'])
+        self.assertEqual(content_file.size, 0)
+
+        def mocked_put_object(cls, url, token, container, name=None,
+                              contents=None, content_length=None, *args, **kwargs):
+            content['saved'] = contents.read()
+            content['size'] = content_length
+
+        with patch('tests.utils.FakeSwift.put_object', new=classmethod(mocked_put_object)):
+            self.backend.save('test.txt', content_file)
+        self.assertEqual(content['saved'], content['orig'])
+        self.assertIsNone(content['size'])
 
     def test_open(self):
         """Attempt to open a object"""
